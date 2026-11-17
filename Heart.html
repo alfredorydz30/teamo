@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050205">
+<title>For Amira ♥</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050205; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: manipulation; cursor: pointer; }
+  .hint {
+    position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    font: 500 11px/1 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    letter-spacing: .26em; text-transform: uppercase;
+    color: rgba(255, 170, 195, .6);
+    pointer-events: none; user-select: none; transition: opacity 1s ease;
+  }
+  .hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="The name Amira glowing. Click to reveal a heart made of the words I love you."></canvas>
+<div class="hint" id="hint">tap</div>
+
+<script>
+(() => {
+  'use strict';
+  const cv = document.getElementById('scene');
+  const ctx = cv.getContext('2d', { alpha: false });
+  const hint = document.getElementById('hint');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const PHRASE = 'I love you';
+  const NAME = 'Amira';
+  const SANS = '"Segoe UI", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif';
+  const SERIF = '"Times New Roman", Times, Georgia, serif';
+  const TAU = Math.PI * 2;
+  const COLORS = ['#d51a38', '#d51a38', '#e62f4c', '#e62f4c', '#c2132c', '#ff5c78', '#ff8fa8', '#ffffff', '#ffffff', '#ffe3ea'];
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const smooth = (t) => { t = clamp(t); return t * t * (3 - 2 * t); };
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const ease = (t) => { t = clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+
+  let W = 0, H = 0, DPR = 1, S = 100, cx = 0, cy = 0, ny = 0, namePx = 48;
+  let words = [];
+  let nameSpr = null;
+  let start = null, restartAt = null;
+
+  // classic rounded heart outline, tested as a polygon
+  let poly = [];
+  function inside(px, py) {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const a = poly[i], b = poly[j];
+      if ((a[1] > py) !== (b[1] > py) && px < (b[0] - a[0]) * (py - a[1]) / (b[1] - a[1]) + a[0]) c = !c;
+    }
+    return c;
+  }
+
+  // pre-rendered sprites: drawing images is far smoother than re-drawing text every frame
+  function makeSprite(font, w, h, col) {
+    const pw = Math.ceil(w + 4), ph = Math.ceil(h);
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(pw * DPR); c.height = Math.ceil(ph * DPR);
+    const g = c.getContext('2d');
+    g.scale(DPR, DPR);
+    g.fillStyle = 'rgba(22,0,10,0.5)';
+    g.fillRect(0, 0, pw, ph);
+    g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = col;
+    g.fillText(PHRASE, pw / 2, ph / 2);
+    return { c, pw, ph };
+  }
+
+  function makeNameSprite() {
+    const pad = Math.ceil(namePx * 2);
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = `400 ${namePx}px ${SERIF}`;
+    const w = Math.ceil(m.measureText(NAME).width) + pad * 2, h = Math.ceil(namePx * 1.4) + pad * 2;
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(w * DPR); c.height = Math.ceil(h * DPR);
+    const g = c.getContext('2d');
+    g.scale(DPR, DPR);
+    g.font = `400 ${namePx}px ${SERIF}`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    const passes = [[namePx * 1.5, 'rgba(255,60,110,0.95)', 'rgba(255,120,160,0.9)'],
+                    [namePx * 0.7, 'rgba(255,150,185,0.95)', 'rgba(255,200,220,0.95)'],
+                    [namePx * 0.25, 'rgba(255,255,255,0.9)', '#ffffff']];
+    for (const [b, sh, f] of passes) {
+      g.shadowBlur = b; g.shadowColor = sh; g.fillStyle = f;
+      g.fillText(NAME, w / 2, h / 2);
+    }
+    return { c, w, h };
+  }
+
+  function scatter() {
+    for (const w of words) {
+      w.sx = rand(-0.05, 1.05) * W;
+      w.sy = rand(-0.05, 1.05) * H;
+      w.r0 = rand(-0.8, 0.8);
+      w.ph = rand(0, TAU);
+      w.curve = rand(-90, 90);
+    }
+  }
+
+  function build() {
+    const r = cv.getBoundingClientRect();
+    W = Math.max(280, Math.round(r.width));
+    H = Math.max(280, Math.round(r.height));
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(W * DPR);
+    cv.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    // heart spans x -16..16, y -17..12 (units); S = pixels per unit
+    S = Math.min(W * 0.94 / 32, H * 0.84 / 29);
+    cx = W / 2;
+    cy = H / 2;
+    ny = cy - 3 * S;
+    const fs = clamp(S * 0.88, 8, 20);
+    namePx = clamp(S * 4.7, 28, 78);
+    nameSpr = makeNameSprite();
+    poly = [];
+    for (let i = 0; i < 180; i++) {
+      const a = (i / 180) * TAU;
+      const hx = 16 * Math.pow(Math.sin(a), 3);
+      const hy = 13 * Math.cos(a) - 5 * Math.cos(2 * a) - 2 * Math.cos(3 * a) - Math.cos(4 * a);
+      poly.push([cx + hx * S * 0.98, cy - (hy + 2.5) * S * 0.98]);
+    }
+
+    ctx.font = `400 ${namePx}px ${SERIF}`;
+    const nw = ctx.measureText(NAME).width;
+
+    words = [];
+    const N = 430;
+    let tries = 0;
+    while (words.length < N && tries < 30000) {
+      tries++;
+      const sz = fs * rand(0.55, 1.7) * (Math.random() < 0.12 ? 1.35 : 1);
+      const bold = Math.random() < 0.4 ? 600 : 400;
+      const font = `${bold} ${sz}px ${SANS}`;
+      ctx.font = font;
+      const w = ctx.measureText(PHRASE).width, h = sz * 1.25;
+      const x = cx + rand(-16, 16) * S;
+      const y = cy + rand(-14.5, 14.5) * S;
+      const hw = w / 2, hh = h / 2;
+      if (!(inside(x, y) && inside(x - hw, y) && inside(x + hw, y) &&
+            inside(x - hw, y - hh) && inside(x + hw, y - hh) &&
+            inside(x - hw, y + hh) && inside(x + hw, y + hh) && inside(x, y - hh))) continue;
+      // clear space for the name
+      const ex = (x - cx) / (nw / 2 + hw + 6), ey = (y - ny) / (namePx * 0.55 + hh + 4);
+      if (ex * ex + ey * ey < 1) continue;
+      const col = COLORS[(Math.random() * COLORS.length) | 0];
+      const d = Math.hypot(x - cx, y - cy) / (S * 17);
+      words.push({
+        tx: x, ty: y, w, h, font,
+        rot: rand(-0.32, 0.32) + (Math.random() < 0.1 ? rand(-0.5, 0.5) : 0),
+        col, spr: makeSprite(font, w, h, col), curve: 0,
+        delay: clamp(d * 0.55 + rand(0, 0.45)),
+        sx: 0, sy: 0, r0: 0, ph: 0
+      });
+    }
+    scatter();
+  }
+
+  function drawBg() {
+    const g = ctx.createRadialGradient(W / 2, H * 0.5, 0, W / 2, H * 0.5, Math.max(W, H) * 0.75);
+    g.addColorStop(0, 'rgb(44,6,22)');
+    g.addColorStop(0.55, 'rgb(18,3,12)');
+    g.addColorStop(1, 'rgb(3,1,4)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // the only glowing element
+  function drawName(pulse) {
+    if (nameSpr) {
+      ctx.save();
+      ctx.translate(cx, ny);
+      ctx.scale(pulse, pulse);
+      ctx.drawImage(nameSpr.c, -nameSpr.w / 2, -nameSpr.h / 2, nameSpr.w, nameSpr.h);
+      ctx.restore();
+      return;
+    }
+    ctx.save();
+    ctx.translate(cx, ny);
+    ctx.scale(pulse, pulse);
+    ctx.font = `400 ${namePx}px ${SERIF}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const passes = [[namePx * 1.5, 'rgba(255,60,110,0.95)', 'rgba(255,120,160,0.9)'],
+                    [namePx * 0.7, 'rgba(255,150,185,0.95)', 'rgba(255,200,220,0.95)'],
+                    [namePx * 0.25, 'rgba(255,255,255,0.9)', '#ffffff']];
+    for (const [b, sh, f] of passes) {
+      ctx.shadowBlur = b; ctx.shadowColor = sh; ctx.fillStyle = f;
+      ctx.fillText(NAME, 0, 0);
+    }
+    ctx.restore();
+  }
+
+  function frame(ms) {
+    if (restartAt !== null && ms >= restartAt) { scatter(); start = ms; restartAt = null; }
+    const gf = restartAt === null ? 1 : 1 - smooth((ms - (restartAt - 600)) / 600);
+    const t = start === null ? -1 : (reduce ? 99 : (ms - start) / 1000);
+    drawBg();
+
+    let beat = 0;
+    if (t > 5) {
+      const p = (t - 5) % 1.4;
+      beat = 0.03 * Math.exp(-Math.pow((p - 0.1) / 0.09, 2)) + 0.018 * Math.exp(-Math.pow((p - 0.4) / 0.1, 2));
+    }
+
+    if (t >= 0) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowBlur = 0;
+      const sc = 1 + beat, oy = cy, T = ms / 1000;
+      for (const w of words) {
+        const local = t - w.delay * 1.9;
+        const a = smooth(local / 1.0) * gf;
+        if (a <= 0.01) continue;
+        const prog = ease(local / 3.2);
+        const dx = w.tx - w.sx, dy = w.ty - w.sy, len = Math.hypot(dx, dy) || 1;
+        const arc = Math.sin(prog * Math.PI) * w.curve;
+        const fl = (1 - prog) * (1 - prog);
+        let x = lerp(w.sx, w.tx, prog) - dy / len * arc + Math.sin(T * 0.8 + w.ph) * 14 * fl;
+        let y = lerp(w.sy, w.ty, prog) + dx / len * arc + Math.cos(T * 0.7 + w.ph) * 14 * fl;
+        x = cx + (x - cx) * sc;
+        y = oy + (y - oy) * sc;
+        ctx.globalAlpha = a;
+        const ang = w.rot + w.r0 * (1 - prog), cs = Math.cos(ang), sn = Math.sin(ang);
+        ctx.setTransform(DPR * cs, DPR * sn, -DPR * sn, DPR * cs, DPR * x, DPR * y);
+        ctx.drawImage(w.spr.c, -w.spr.pw / 2, -w.spr.ph / 2, w.spr.pw, w.spr.ph);
+      }
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+
+    drawName(1 + 0.02 * Math.sin(ms / 1000 * 1.6) + beat * 0.6);
+    requestAnimationFrame(frame);
+  }
+
+  function reveal() {
+    const now = performance.now();
+    if (start === null || reduce) { scatter(); start = now; }
+    else if (restartAt === null) restartAt = now + 600;
+    hint.classList.add('gone');
+  }
+  cv.addEventListener('pointerdown', reveal);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
+  });
+  let rt = 0;
+  window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(build, 120); });
+
+  build();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
